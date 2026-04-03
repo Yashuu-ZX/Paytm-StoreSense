@@ -1,0 +1,31 @@
+{
+  "version": "2.1",
+  "rtsp_url": "0",
+  "calibration_timestamp": "2026-04-03T05:53:56.480Z",
+  "global_settings": {
+    "store_open_time": "00:00",
+    "store_close_time": "23:59",
+    "interaction_friction_window": 10,
+    "decision_window": 5
+  },
+  "rois": [
+    {
+      "zone_id": "Zone_1",
+      "x": 789,
+      "y": 224,
+      "width": 421,
+      "height": 276,
+      "shelf_side": "right",
+      "tripwire": [
+        [
+          955,
+          224
+        ],
+        [
+          955,
+          500
+        ]
+      ]
+    }
+  ]
+}
