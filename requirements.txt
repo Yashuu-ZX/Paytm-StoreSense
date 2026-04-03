@@ -1,0 +1,19 @@
+# StoreSense Phase 4 Dependencies (with Object Detection)
+# ========================================================
+
+# Core computer vision library
+opencv-python>=4.8.0
+
+# Google MediaPipe for hand tracking
+mediapipe>=0.10.0
+
+# YOLOv8 for object detection
+ultralytics>=8.0.0
+
+# DeepSORT for lightweight multi-object tracking
+deep-sort-realtime>=1.3.2
+
+# PyTorch (required by ultralytics, will auto-install appropriate version)
+# torch>=2.0.0
+
+# Note: numpy is automatically installed as a dependency of opencv-python

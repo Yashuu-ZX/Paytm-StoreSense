@@ -1,0 +1,25 @@
+# Dependencies
+/node_modules
+/backend/node_modules
+/frontend/node_modules
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build artifacts
+/frontend/build
+
+# DB files
+*.db
+*.db-shm
+*.db-wal
+
+# Other
+.DS_Store
+nul
+yolov8n.pt
+hand_landmarker.task
+tmp_video_frames/

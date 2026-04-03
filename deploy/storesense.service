@@ -1,0 +1,77 @@
+# StoreSense Edge Engine - Systemd Service File
+# ==============================================
+# 
+# This service file runs the Python edge engine automatically on boot
+# and restarts it if it crashes.
+#
+# Installation:
+#   1. Copy this file to /etc/systemd/system/storesense.service
+#   2. Update the paths below to match your installation
+#   3. Run: sudo systemctl daemon-reload
+#   4. Run: sudo systemctl enable storesense
+#   5. Run: sudo systemctl start storesense
+#
+# Management Commands:
+#   sudo systemctl status storesense    # Check status
+#   sudo systemctl start storesense     # Start service
+#   sudo systemctl stop storesense      # Stop service
+#   sudo systemctl restart storesense   # Restart service
+#   sudo journalctl -u storesense -f    # View logs
+
+[Unit]
+Description=StoreSense Edge AI Engine
+Documentation=https://github.com/your-org/storesense
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# User to run the service (don't run as root!)
+User=pi
+Group=pi
+
+# Working directory (where your Python scripts are)
+WorkingDirectory=/home/pi/storesense
+
+# Environment variables
+Environment="DISPLAY=:0"
+Environment="PYTHONUNBUFFERED=1"
+Environment="STORESENSE_API_URL=http://localhost:3001"
+Environment="STORESENSE_CONFIG=/home/pi/storesense/config.json"
+
+# The command to run
+# Adjust the Python path and script arguments as needed
+# Note: API telemetry is enabled by default, use --no-api to disable
+ExecStart=/usr/bin/python3 /home/pi/storesense/store_sense_engine.py \
+    --config /home/pi/storesense/config.json \
+    --headless \
+    --api-url http://localhost:3001
+
+# Restart policy - restart on failure with increasing delays
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# If it fails more than 5 times in 60 seconds, wait 5 minutes
+# before trying again (prevents CPU burn on persistent failures)
+StartLimitAction=none
+
+# Logging - use journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=storesense
+
+# Resource limits (optional, adjust based on your hardware)
+# MemoryMax=512M
+# CPUQuota=80%
+
+# Security hardening (optional)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/storesense
+
+[Install]
+WantedBy=multi-user.target

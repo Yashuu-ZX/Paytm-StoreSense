@@ -1,0 +1,394 @@
+"""
+StoreSense Telemetry Sender Module
+==================================
+
+This module provides functionality to send telemetry data from the 
+Phase 2 edge engine to the Phase 4 backend API.
+
+Features:
+- Async-safe HTTP posting (non-blocking)
+- Automatic retry with exponential backoff
+- Batch event buffering
+- Graceful degradation when server is unavailable
+
+Usage:
+    from telemetry_sender import TelemetrySender
+    
+    sender = TelemetrySender(api_url="http://localhost:3001")
+    sender.send_event(zone_id="Shelf_1", event="TAKEN", neglect_rate=12.5)
+
+@author StoreSense Team
+@version 4.0
+"""
+
+import requests
+import threading
+import queue
+import time
+import logging
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass, asdict
+from datetime import datetime
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TelemetryEvent:
+    """Single telemetry event to be sent to the API."""
+    timestamp: int
+    zone_id: str
+    event: str
+    neglect_rate_pct: float
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class TelemetrySender:
+    """
+    Handles sending telemetry data to the Phase 4 backend API.
+    
+    Uses a background thread and queue to prevent blocking the main
+    video processing loop. Events are buffered and sent in batches.
+    
+    Attributes:
+        api_url: Base URL of the telemetry API
+        batch_size: Number of events to batch before sending
+        flush_interval: Max seconds to wait before flushing partial batch
+        max_retries: Maximum retry attempts for failed requests
+    """
+    
+    def __init__(
+        self,
+        api_url: str = "http://localhost:3001",
+        batch_size: int = 10,
+        flush_interval: float = 5.0,
+        max_retries: int = 3,
+        timeout: float = 5.0
+    ):
+        """
+        Initialize the TelemetrySender.
+        
+        Args:
+            api_url: Base URL of the Phase 4 API server
+            batch_size: Events to batch before sending
+            flush_interval: Seconds between automatic flushes
+            max_retries: Retry attempts for failed requests
+            timeout: HTTP request timeout in seconds
+        """
+        self.api_url = api_url.rstrip('/')
+        self.telemetry_endpoint = f"{self.api_url}/api/telemetry"
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        self.max_retries = max_retries
+        self.timeout = timeout
+        
+        # Event queue for async processing
+        self._queue: queue.Queue = queue.Queue()
+        self._buffer: List[TelemetryEvent] = []
+        self._lock = threading.Lock()
+        
+        # Background worker thread
+        self._running = False
+        self._worker_thread: Optional[threading.Thread] = None
+        self._last_flush_time = time.time()
+        
+        # Statistics
+        self._events_sent = 0
+        self._events_failed = 0
+        self._is_connected = False
+        
+        logger.info(f"TelemetrySender initialized: {self.telemetry_endpoint}")
+    
+    def start(self) -> None:
+        """Start the background worker thread."""
+        if self._running:
+            return
+        
+        self._running = True
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop,
+            daemon=True,
+            name="TelemetryWorker"
+        )
+        self._worker_thread.start()
+        logger.info("Telemetry sender started")
+    
+    def stop(self) -> None:
+        """Stop the background worker and flush remaining events."""
+        self._running = False
+        
+        # Flush any remaining events
+        self._flush_buffer()
+        
+        if self._worker_thread:
+            self._worker_thread.join(timeout=5.0)
+        
+        logger.info(f"Telemetry sender stopped. "
+                   f"Sent: {self._events_sent}, Failed: {self._events_failed}")
+    
+    def send_event(
+        self,
+        zone_id: str,
+        event: str,
+        neglect_rate_pct: float = 0.0,
+        timestamp: Optional[int] = None
+    ) -> None:
+        """
+        Queue a telemetry event for sending.
+        
+        This method is non-blocking and safe to call from the main loop.
+        
+        Args:
+            zone_id: Zone identifier (e.g., "Shelf_1_Spices")
+            event: Event type ("TAKEN", "PUT_BACK", "TOUCH")
+            neglect_rate_pct: Current neglect rate for the zone
+            timestamp: Unix timestamp (defaults to now)
+        """
+        if timestamp is None:
+            timestamp = int(time.time())
+        
+        event_obj = TelemetryEvent(
+            timestamp=timestamp,
+            zone_id=zone_id,
+            event=event,
+            neglect_rate_pct=neglect_rate_pct
+        )
+        
+        self._queue.put(event_obj)
+    
+    def send_telemetry_payload(self, payload: Dict[str, Any]) -> bool:
+        """
+        Send a complete telemetry payload (as generated by Phase 2).
+        
+        This handles the StoreSense telemetry format with zones array.
+        
+        Args:
+            payload: The telemetry payload dict
+            
+        Returns:
+            bool: True if sent successfully
+        """
+        try:
+            response = requests.post(
+                self.telemetry_endpoint,
+                json=payload,
+                timeout=self.timeout
+            )
+            
+            if response.status_code == 200:
+                self._is_connected = True
+                result = response.json()
+                self._events_sent += result.get('processed', 1)
+                logger.debug(f"Telemetry sent: {result.get('processed', 1)} events")
+                return True
+            else:
+                logger.warning(f"Telemetry API error: {response.status_code}")
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            self._is_connected = False
+            logger.warning(f"Telemetry send failed: {e}")
+            return False
+    
+    def _worker_loop(self) -> None:
+        """Background worker loop that processes the event queue."""
+        while self._running:
+            try:
+                # Try to get events from queue (with timeout)
+                try:
+                    event = self._queue.get(timeout=0.5)
+                    with self._lock:
+                        self._buffer.append(event)
+                except queue.Empty:
+                    pass
+                
+                # Check if we should flush
+                should_flush = False
+                with self._lock:
+                    if len(self._buffer) >= self.batch_size:
+                        should_flush = True
+                    elif (len(self._buffer) > 0 and 
+                          time.time() - self._last_flush_time >= self.flush_interval):
+                        should_flush = True
+                
+                if should_flush:
+                    self._flush_buffer()
+                    
+            except Exception as e:
+                logger.error(f"Worker loop error: {e}")
+    
+    def _flush_buffer(self) -> None:
+        """Send all buffered events to the API."""
+        with self._lock:
+            if not self._buffer:
+                return
+            
+            events = self._buffer.copy()
+            self._buffer.clear()
+            self._last_flush_time = time.time()
+        
+        # Send batch
+        success = self._send_batch(events)
+        
+        if success:
+            self._events_sent += len(events)
+        else:
+            self._events_failed += len(events)
+    
+    def _send_batch(self, events: List[TelemetryEvent]) -> bool:
+        """
+        Send a batch of events with retry logic.
+        
+        Args:
+            events: List of TelemetryEvent objects
+            
+        Returns:
+            bool: True if sent successfully
+        """
+        payload = {
+            "events": [e.to_dict() for e in events]
+        }
+        
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(
+                    self.telemetry_endpoint,
+                    json=payload,
+                    timeout=self.timeout
+                )
+                
+                if response.status_code == 200:
+                    self._is_connected = True
+                    logger.debug(f"Batch sent: {len(events)} events")
+                    return True
+                else:
+                    logger.warning(f"API error {response.status_code}, "
+                                 f"attempt {attempt + 1}/{self.max_retries}")
+                    
+            except requests.exceptions.RequestException as e:
+                self._is_connected = False
+                logger.warning(f"Request failed: {e}, "
+                             f"attempt {attempt + 1}/{self.max_retries}")
+            
+            # Exponential backoff
+            if attempt < self.max_retries - 1:
+                time.sleep(0.5 * (2 ** attempt))
+        
+        return False
+    
+    def check_connection(self) -> bool:
+        """
+        Check if the API server is reachable.
+        
+        Returns:
+            bool: True if server is responding
+        """
+        try:
+            response = requests.get(
+                f"{self.api_url}/api/health",
+                timeout=2.0
+            )
+            self._is_connected = response.status_code == 200
+            return self._is_connected
+        except:
+            self._is_connected = False
+            return False
+    
+    @property
+    def is_connected(self) -> bool:
+        """Check if currently connected to the API."""
+        return self._is_connected
+    
+    @property
+    def stats(self) -> Dict[str, int]:
+        """Get sending statistics."""
+        return {
+            "events_sent": self._events_sent,
+            "events_failed": self._events_failed,
+            "buffer_size": len(self._buffer),
+            "queue_size": self._queue.qsize()
+        }
+
+
+# =============================================================================
+# CONVENIENCE FUNCTION FOR PHASE 2 INTEGRATION
+# =============================================================================
+
+def create_telemetry_sender(
+    api_url: str = "http://localhost:3001",
+    auto_start: bool = True
+) -> TelemetrySender:
+    """
+    Create and optionally start a TelemetrySender instance.
+    
+    This is a convenience function for easy integration with Phase 2.
+    
+    Args:
+        api_url: Backend API URL
+        auto_start: Whether to start the background worker immediately
+        
+    Returns:
+        Configured TelemetrySender instance
+    """
+    sender = TelemetrySender(api_url=api_url)
+    
+    if auto_start:
+        sender.start()
+        
+        # Check initial connection
+        if sender.check_connection():
+            logger.info("Connected to telemetry API")
+        else:
+            logger.warning("Telemetry API not reachable - events will be queued")
+    
+    return sender
+
+
+# =============================================================================
+# EXAMPLE USAGE / TEST
+# =============================================================================
+
+if __name__ == "__main__":
+    # Configure logging for test
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    print("Testing TelemetrySender...")
+    
+    # Create sender
+    sender = create_telemetry_sender()
+    
+    # Check connection
+    if sender.check_connection():
+        print("Connected to API!")
+    else:
+        print("API not reachable (events will be queued)")
+    
+    # Send test events
+    test_events = [
+        ("Shelf_1_Spices", "TAKEN", 5.2),
+        ("Shelf_2_Snacks", "PUT_BACK", 12.8),
+        ("Shelf_1_Spices", "TOUCH", 6.1),
+        ("Shelf_3_Drinks", "TAKEN", 25.5),
+    ]
+    
+    for zone_id, event, neglect in test_events:
+        sender.send_event(zone_id, event, neglect)
+        print(f"Queued: {zone_id} - {event}")
+        time.sleep(0.5)
+    
+    # Wait for events to be sent
+    print("\nWaiting for events to be sent...")
+    time.sleep(3)
+    
+    # Print stats
+    print(f"\nStats: {sender.stats}")
+    
+    # Stop sender
+    sender.stop()
+    print("Done!")

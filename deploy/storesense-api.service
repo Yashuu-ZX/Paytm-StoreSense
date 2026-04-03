@@ -1,0 +1,49 @@
+# StoreSense Backend API - Systemd Service File
+# ==============================================
+# 
+# This service file runs the Node.js backend API server automatically on boot.
+#
+# Installation:
+#   1. Copy this file to /etc/systemd/system/storesense-api.service
+#   2. Update the paths below to match your installation
+#   3. Run: sudo systemctl daemon-reload
+#   4. Run: sudo systemctl enable storesense-api
+#   5. Run: sudo systemctl start storesense-api
+
+[Unit]
+Description=StoreSense Backend API Server
+Documentation=https://github.com/your-org/storesense
+After=network.target mongodb.service
+Wants=mongodb.service
+
+[Service]
+Type=simple
+
+# User to run the service
+User=pi
+Group=pi
+
+# Working directory
+WorkingDirectory=/home/pi/storesense/backend
+
+# Environment variables
+Environment="NODE_ENV=production"
+Environment="PORT=3001"
+Environment="MONGODB_URI=mongodb://localhost:27017/storesense"
+
+# Use the MongoDB version of the server
+ExecStart=/usr/bin/node /home/pi/storesense/backend/server-mongo.js
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=storesense-api
+
+[Install]
+WantedBy=multi-user.target
